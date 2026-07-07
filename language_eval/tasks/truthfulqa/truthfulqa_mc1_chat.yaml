@@ -1,0 +1,33 @@
+tag:
+  - truthfulqa
+task: truthfulqa_mc1_chat
+dataset_path: truthfulqa/truthful_qa
+dataset_name: multiple_choice
+output_type: generate_until
+training_split: null
+validation_split: validation
+test_split: null
+num_fewshot: 0
+process_docs: !function utils.process_docs_mc1_chat
+doc_to_text: !function utils.doc_to_text_mc1_chat
+doc_to_target: !function utils.doc_to_target_mc1_chat
+generation_kwargs:
+  max_gen_toks: 100
+  until:
+    - "\n\n"
+    - "."
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+    ignore_case: true
+    ignore_punctuation: true
+filter_list:
+  - name: get_answer_letter
+    filter:
+      - function: "regex"
+        regex_pattern: "(?i)(?:best answer is:?\\s*)?([A-Z])(?:\\b|$)"
+        group_select: -1
+      - function: take_first
+metadata:
+  version: 1.0

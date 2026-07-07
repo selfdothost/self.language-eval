@@ -1,0 +1,3 @@
+include: _hellaswag_split_template_yaml
+task: hellaswag_wikihow_pets
+process_docs: !function utils.process_docs_wikihow_pets

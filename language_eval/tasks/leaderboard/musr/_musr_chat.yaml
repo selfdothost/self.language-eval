@@ -1,0 +1,11 @@
+group: leaderboard_musr_chat
+task:
+  - leaderboard_musr_chat_murder_mysteries
+  - leaderboard_musr_chat_object_placements
+  - leaderboard_musr_chat_team_allocation
+aggregate_metric_list:
+  - metric: exact_match
+    aggregation: mean
+    weight_by_size: true
+metadata:
+  version: 1.0

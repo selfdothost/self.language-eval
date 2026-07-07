@@ -1,0 +1,34 @@
+group: hellaswag_chat_split
+task:
+  - hellaswag_chat_activitynet_sports
+  - hellaswag_chat_activitynet_music
+  - hellaswag_chat_activitynet_water
+  - hellaswag_chat_activitynet_home
+  - hellaswag_chat_activitynet_personal_care
+  - hellaswag_chat_activitynet_food
+  - hellaswag_chat_activitynet_combat
+  - hellaswag_chat_activitynet_other
+  - hellaswag_chat_wikihow_personal_care
+  - hellaswag_chat_wikihow_family_life
+  - hellaswag_chat_wikihow_food
+  - hellaswag_chat_wikihow_computers
+  - hellaswag_chat_wikihow_health
+  - hellaswag_chat_wikihow_home_garden
+  - hellaswag_chat_wikihow_finance
+  - hellaswag_chat_wikihow_pets
+  - hellaswag_chat_wikihow_education
+  - hellaswag_chat_wikihow_youth
+  - hellaswag_chat_wikihow_sports
+  - hellaswag_chat_wikihow_relationships
+  - hellaswag_chat_wikihow_work
+  - hellaswag_chat_wikihow_cars
+  - hellaswag_chat_wikihow_travel
+  - hellaswag_chat_wikihow_holidays
+  - hellaswag_chat_wikihow_philosophy
+  - hellaswag_chat_wikihow_other
+aggregate_metric_list:
+  - metric: exact_match
+    aggregation: mean
+    weight_by_size: true
+metadata:
+  version: 1.0

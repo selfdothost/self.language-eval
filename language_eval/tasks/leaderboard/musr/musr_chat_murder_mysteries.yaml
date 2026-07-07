@@ -1,0 +1,4 @@
+include: _musr_chat_template_yaml
+dataset_name: default
+test_split: murder_mysteries
+task: leaderboard_musr_chat_murder_mysteries

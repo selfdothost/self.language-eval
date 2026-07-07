@@ -1,0 +1,28 @@
+self.language-eval
+Copyright (C) 2026 selfdothost / the self.ai contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License version 3, as published by the Free
+Software Foundation. The full text is in LICENSE.
+
+--------------------------------------------------------------------------------
+Provenance & retained upstream notice
+--------------------------------------------------------------------------------
+
+self.language-eval is a fully vendored, renamed fork of EleutherAI's Language
+Model Evaluation Harness (https://github.com/EleutherAI/lm-evaluation-harness),
+originally licensed MIT. It was previously carried as self.lm-evaluation-harness;
+the Python package was renamed lm_eval -> language_eval.
+
+Why fully vendored: self.ai licenses the combined work under GPLv3. MIT is
+one-way compatible with GPLv3, so the upstream code is included here under GPLv3
+while its original MIT license text and attribution are retained in
+LICENSE.eleutherai-mit. A GPLv3 combined work cannot be contributed back to an
+MIT upstream, so self.language-eval is a hard vendor: we do not track or push to
+the original project. self.language-eval is not affiliated with, endorsed by, or
+connected to EleutherAI.
+
+self.language-eval is the catch-all harness for language-focused evaluation
+tasks; more specific language-eval harnesses are forked from it.
+
+The original MIT license text is preserved verbatim in LICENSE.eleutherai-mit.

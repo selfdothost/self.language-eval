@@ -1,0 +1,3 @@
+include: _hellaswag_split_template_yaml
+task: hellaswag_activitynet_home
+process_docs: !function utils.process_docs_activitynet_home
