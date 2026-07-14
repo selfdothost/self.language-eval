@@ -3,9 +3,11 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import os
 import random
 import time
 from collections import defaultdict
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -410,6 +412,45 @@ def simple_evaluate(
         return None
 
 
+def _write_live_event(events_path, index, total, task_name, doc, target, results, metrics, doc_id):
+    """Append one scored-sample event to the live-events JSONL file.
+
+    Used by the self.ai API layer (see api/main.py, LMEVAL_LIVE_EVENTS_PATH) to
+    stream per-sample progress to the UI while an evaluation job is running.
+    Never raises: a failure to write an event must not break evaluation.
+    """
+    try:
+
+        def _safe_str(obj, limit=2000):
+            s = str(obj) if obj is not None else ""
+            return s[:limit]
+
+        def _make_serializable(obj):
+            if isinstance(obj, (str, int, float, bool, type(None))):
+                return obj
+            if isinstance(obj, dict):
+                return {k: _make_serializable(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_make_serializable(i) for i in obj]
+            return str(obj)
+
+        event = {
+            "index": index,
+            "total": total,
+            "task_name": task_name,
+            "doc_id": doc_id,
+            "prompt": _safe_str(doc.get("question", doc.get("text", doc.get("query", "")))),
+            "target": _safe_str(target, 1000),
+            "response": _safe_str(results[0] if results else ""),
+            "metrics": _make_serializable(metrics),
+            "timestamp": datetime.now().isoformat(),
+        }
+        with open(events_path, "a") as f:
+            f.write(json.dumps(event, default=str, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # never break evaluation
+
+
 @positional_deprecated
 def evaluate(
     lm: LM,
@@ -499,6 +540,23 @@ def evaluate(
         for task_obj in eval_tasks.values()
     ):
         raise ValueError("log_samples must be True for 'bypass' metric-only tasks")
+
+    # Live-events progress stream for the self.ai API layer: when
+    # LMEVAL_LIVE_EVENTS_PATH is set, each scored sample is appended as a JSONL
+    # event (see _write_live_event below) so the UI can show progress while
+    # this run is in flight.
+    _live_events_path = os.environ.get("LMEVAL_LIVE_EVENTS_PATH")
+    _live_event_counter = [0]
+    _live_total_docs = 0
+    if _live_events_path:
+        for _tn, _tk in eval_tasks.items():
+            try:
+                _tdocs = list(_tk.test_docs()) if hasattr(_tk, "test_docs") and _tk.has_test_docs else []
+                if not _tdocs and hasattr(_tk, "validation_docs") and _tk.has_validation_docs:
+                    _tdocs = list(_tk.validation_docs())
+                _live_total_docs += len(_tdocs)
+            except Exception:
+                pass
 
     # validation checks:
     # 1.are we running code that is marked as unsafe.
@@ -651,6 +709,19 @@ def evaluate(
                     }
                     example.update(metrics)
                     acc["logged_samples"].append(example)
+                    if _live_events_path:
+                        _write_live_event(
+                            _live_events_path,
+                            _live_event_counter[0],
+                            _live_total_docs,
+                            task_name,
+                            doc,
+                            target,
+                            [req.filtered_resps[filter_key] for req in requests],
+                            metrics,
+                            doc_id_true,
+                        )
+                        _live_event_counter[0] += 1
                 for metric, value in metrics.items():
                     acc["raw_metrics"][(metric, filter_key)].append(value)
 

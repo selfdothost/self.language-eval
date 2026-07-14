@@ -1,10 +1,10 @@
-# self.language-eval CI — yard-native image build.
+# self.language-eval CI — test, then yard-native image build, then mirror sync.
 # kaniko on bigbuild -> container.home (same pattern as self.ai / self.chat).
 # CPU-only: the harness runs benchmarks by calling each model's OpenAI-compatible
 # API, it doesn't run models locally. Builds the FastAPI control plane + the
 # vendored language-eval framework into one image (api/main.py on :8096).
 
-stages: [build, publish]
+stages: [test, build, publish]
 
 include:
   - project: 'selfshipyard/selfai/self.ai'
@@ -17,11 +17,27 @@ default:
 variables:
   IMAGE: $CI_REGISTRY_IMAGE
 
-# --- publish: mirror main -> public-alpha (GitLab + GitHub), scheduled only -
-sync:public-alpha:
-  extends: .sync-public-alpha
-  variables:
-    MIRROR_EXCLUDE_PATHS: ""
+test:language-eval:
+  stage: test
+  image: python:3.11-slim
+  timeout: 30m
+  before_script:
+    - pip install --no-cache-dir -e ".[api,ifeval,math,multilingual]" pytest
+  script:
+    # Same install footprint as the production image (Dockerfile): no
+    # hf/torch, vllm, sglang, or optimum extras. Skip the suites that only
+    # exercise those optional model backends — they need deps the shipped
+    # image never installs, so they can't run here (see the
+    # "[from sweep]" CI-coverage issue for the tracked gap).
+    - >
+      pytest tests/ -q
+      --ignore=tests/models
+      --ignore=tests/test_requests_caching.py
+      --ignore=tests/test_utils.py
+      --ignore=tests/test_evaluator.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
 
 build:language-eval:
   stage: build
@@ -43,3 +59,9 @@ build:language-eval:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
+
+# --- publish: mirror main -> public-alpha (GitLab + GitHub), scheduled only -
+sync:public-alpha:
+  extends: .sync-public-alpha
+  variables:
+    MIRROR_EXCLUDE_PATHS: ""

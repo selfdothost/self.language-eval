@@ -1,4 +1,4 @@
-# Language Model Evaluation Harness
+# self.language-eval
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.10256836.svg)](https://doi.org/10.5281/zenodo.10256836)
 
@@ -12,39 +12,43 @@
 
 ---
 
-## Latest News 📣
-- [2025/12] **CLI refactored** with subcommands (`run`, `ls`, `validate`) and YAML config file support via `--config`. See the [CLI Reference](./docs/interface.md) and [Configuration Guide](./docs/config_files.md).
-- [2025/12] **Lighter install**: Base package no longer includes `transformers`/`torch`. Install model backends separately: `pip install language_eval[hf]`, `language_eval[vllm]`, etc.
-- [2025/07] Added `think_end_token` arg to `hf` (token/str), `vllm` and `sglang` (str) for stripping CoT reasoning traces from models that support it.
-- [2025/03] Added support for steering HF models!
-- [2025/02] Added [SGLang](https://docs.sglang.ai/) support!
-- [2024/09] We are prototyping allowing users of LM Evaluation Harness to create and evaluate on text+image multimodal input, text output tasks, and have just added the `hf-multimodal` and `vllm-vlm` model types and `mmmu` task as a prototype feature. We welcome users to try out this in-progress feature and stress-test it for themselves, and suggest they check out [`lmms-eval`](https://github.com/EvolvingLMMs-Lab/lmms-eval), a wonderful project originally forking off of the lm-evaluation-harness, for a broader range of multimodal tasks, models, and features.
-- [2024/07] [API model](docs/API_guide.md) support has been updated and refactored, introducing support for batched and async requests, and making it significantly easier to customize and use for your own purposes. **To run Llama 405B, we recommend using VLLM's OpenAI-compliant API to host the model, and use the `local-completions` model type to evaluate the model.**
-- [2024/07] New Open LLM Leaderboard tasks have been added ! You can find them under the [leaderboard](language_eval/tasks/leaderboard/README.md) task group.
+## How self.ai uses this
 
----
+self.language-eval ships two layers:
 
-## Announcement
+- **The evaluation harness** (`language_eval/`) — the vendored EleutherAI
+  framework itself: task definitions, model backends, scoring. See
+  [Overview](#overview) below for the supported feature/task list.
+- **A FastAPI control plane** (`api/main.py`, port `8096`) — self.ai-specific,
+  not part of upstream. Wraps the harness as a job-queue service: submit a
+  benchmark run against a chat-completions endpoint, stream its logs/live
+  sample progress, list/inspect/purge past results. This is what self.ai's own
+  API server talks to; it is the real integration point in production, not
+  the raw CLI usage documented below.
 
-**A new v0.4.0 release of lm-evaluation-harness is available** !
+  | Endpoint | Purpose |
+  |---|---|
+  | `GET /api/tasks`, `GET /api/tasks/categories` | List available benchmark tasks |
+  | `POST /api/jobs` | Submit an evaluation job (supports a `dry_run` mode for UI integration testing) |
+  | `GET /api/jobs`, `GET /api/jobs/{id}` | List / inspect jobs |
+  | `GET /api/jobs/{id}/logs`, `GET /api/jobs/{id}/live` | Job logs, live SSE sample streaming |
+  | `DELETE /api/jobs/{id}`, `DELETE /api/jobs/{id}/purge` | Cancel / purge a job |
+  | `GET /api/results`, `GET /api/results/{id}` | List / inspect results |
+  | `GET /api/results/{id}/samples` | Per-sample generations for a completed job |
+  | `GET /health` | Liveness |
 
-New updates and features include:
+## Build & deploy
 
-- **New Open LLM Leaderboard tasks have been added ! You can find them under the [leaderboard](language_eval/tasks/leaderboard/README.md) task group.**
-- Internal refactoring
-- Config-based task creation and configuration
-- Easier import and sharing of externally-defined task config YAMLs
-- Support for Jinja2 prompt design, easy modification of prompts + prompt imports from Promptsource
-- More advanced configuration options, including output post-processing, answer extraction, and multiple LM generations per document, configurable fewshot settings, and more
-- Speedups and new modeling libraries supported, including: faster data-parallel HF model usage, vLLM support, MPS support with HuggingFace, and more
-- Logging and usability changes
-- New tasks including CoT BIG-Bench-Hard, Belebele, user-defined task groupings, and more
+Built and published via GitLab CI (kaniko, yard-native — no local Docker
+workflow) from the single `Dockerfile` at repo root, same pattern as the rest
+of self.ai's CPU-only eval images. The image bundles the FastAPI control plane
+and the vendored `language_eval` framework's `api`, `ifeval`, `math`, and
+`multilingual` extras (CPU-only: the harness benchmarks models by calling their
+OpenAI-compatible API, it does not run models locally).
 
-Please see our updated documentation pages in `docs/` for more details.
-
-Development will be continuing on the `main` branch, and we encourage you to give us feedback on what features are desired and how to improve the library further, or ask questions, either in issues or PRs on GitHub, or in the [EleutherAI discord](https://discord.gg/eleutherai)!
-
----
+The Dockerfile also runs `patches/apply_patch.py` at build time, which patches
+`language_eval/evaluator.py` and `language_eval/models/api_models.py` to emit
+live per-sample events (used by the `/api/jobs/{id}/live` SSE endpoint above).
 
 ## Overview
 
@@ -65,11 +69,9 @@ The Language Model Evaluation Harness is the backend for 🤗 Hugging Face's pop
 
 ## Install
 
-To install the `language-eval` package from the github repository, run:
+This repo is the harness — no separate clone needed. From a checkout:
 
 ```bash
-git clone --depth 1 https://github.com/EleutherAI/lm-evaluation-harness
-cd lm-evaluation-harness
 pip install -e .
 ```
 
@@ -287,7 +289,7 @@ language_eval --model steered \
 
 [NVIDIA NeMo Framework](https://github.com/NVIDIA/NeMo) is a generative AI framework built for researchers and pytorch developers working on language models.
 
-To evaluate a `nemo` model, start by installing NeMo following [the documentation](https://github.com/NVIDIA/NeMo?tab=readme-ov-file#installation). We highly recommended to use the NVIDIA PyTorch or NeMo container, especially if having issues installing Apex or any other dependencies (see [latest released containers](https://github.com/NVIDIA/NeMo/releases)). Please also install the lm evaluation harness library following the instructions in [the Install section](https://github.com/EleutherAI/lm-evaluation-harness/tree/main?tab=readme-ov-file#install).
+To evaluate a `nemo` model, start by installing NeMo following [the documentation](https://github.com/NVIDIA/NeMo?tab=readme-ov-file#installation). We highly recommended to use the NVIDIA PyTorch or NeMo container, especially if having issues installing Apex or any other dependencies (see [latest released containers](https://github.com/NVIDIA/NeMo/releases)). Please also install the harness library following the instructions in [the Install section](#install).
 
 NeMo models can be obtained through [NVIDIA NGC Catalog](https://catalog.ngc.nvidia.com/models) or in [NVIDIA's Hugging Face page](https://huggingface.co/nvidia). In [NVIDIA NeMo Framework](https://github.com/NVIDIA/NeMo/tree/main/scripts/nlp_language_modeling) there are conversion scripts to convert the `hf` checkpoints of popular models like llama, falcon, mixtral or mpt to `nemo`.
 
@@ -437,7 +439,7 @@ language_eval --model vllm \
     --batch_size auto
 ```
 
-To use vllm, do `pip install "language_eval[vllm]"`. For a full list of supported vLLM configurations, please reference our [vLLM integration](https://github.com/EleutherAI/lm-evaluation-harness/blob/e74ec966556253fbe3d8ecba9de675c77c075bce/lm_eval/models/vllm_causallms.py) and the vLLM documentation.
+To use vllm, do `pip install "language_eval[vllm]"`. For a full list of supported vLLM configurations, please reference our [vLLM integration](language_eval/models/vllm_causallms.py) and the vLLM documentation.
 
 vLLM occasionally differs in output from Huggingface. We treat Huggingface as the reference implementation and provide a [script](./scripts/model_comparator.py) for checking the validity of vllm results against HF.
 
@@ -547,7 +549,7 @@ Note that for externally hosted models, configs such as `--device` which relate 
 
 Models which do not supply logits or logprobs can be used with tasks of type `generate_until` only, while local models, or APIs that supply logprobs/logits of their prompts, can be run on all task types: `generate_until`, `loglikelihood`, `loglikelihood_rolling`, and `multiple_choice`.
 
-For more information on the different task `output_types` and model request types, see [our documentation](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/docs/model_guide.md#interface).
+For more information on the different task `output_types` and model request types, see [our documentation](docs/model_guide.md#interface).
 
 > [!Note]
 > For best performance with closed chat model APIs such as Anthropic Claude 3 and GPT-4, we recommend carefully looking at a few sample outputs using `--limit 10` first to confirm answer extraction and scoring on generative tasks is performing as expected. providing `system="<some system prompt here>"` within `--model_args` for anthropic-chat-completions, to instruct the model what format to respond in, may be useful.
@@ -556,7 +558,7 @@ For more information on the different task `output_types` and model request type
 
 A number of other libraries contain scripts for calling the eval harness through their library. These include [GPT-NeoX](https://github.com/EleutherAI/gpt-neox/blob/main/eval_tasks/eval_adapter.py), [Megatron-DeepSpeed](https://github.com/microsoft/Megatron-DeepSpeed/blob/main/examples/MoE/readme_evalharness.md), and [mesh-transformer-jax](https://github.com/kingoflolz/mesh-transformer-jax/blob/master/eval_harness.py).
 
-To create your own custom integration you can follow instructions from [this tutorial](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/docs/interface.md#external-library-usage).
+To create your own custom integration you can follow instructions from [this tutorial](docs/interface.md#external-library-usage).
 
 ### Additional Features
 
@@ -652,7 +654,7 @@ from datasets import load_dataset
 load_dataset("EleutherAI/language-eval-results-private", "hellaswag", "latest")
 ```
 
-For a full list of supported arguments, check out the [interface](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/docs/interface.md) guide in our documentation!
+For a full list of supported arguments, check out the [interface](docs/interface.md) guide in our documentation!
 
 ## Visualizing Results
 
@@ -736,17 +738,15 @@ In the stdout, you will find the link to the W&B run page as well as link to the
 
 ## Contributing
 
-Check out our [open issues](https://github.com/EleutherAI/lm-evaluation-harness/issues) and feel free to submit pull requests!
+self.language-eval is a hard vendor (see [`NOTICE`](NOTICE)): changes land here
+directly, not via upstream PRs. For more information on the library and how
+everything fits together, see our [documentation pages](docs/).
 
-For more information on the library and how everything fits together, see our [documentation pages](https://github.com/EleutherAI/lm-evaluation-harness/tree/main/docs).
-
-To get started with development, first clone the repository and install the dev dependencies:
+To get started with development, install the dev dependencies from a checkout:
 
 ```bash
-git clone https://github.com/EleutherAI/lm-evaluation-harness
-cd lm-evaluation-harness
 pip install -e ".[dev,hf]"
-````
+```
 
 ### Implementing new tasks
 
@@ -765,7 +765,7 @@ We try to prioritize agreement with the procedures used by other groups to decre
 
 ### Support
 
-The best way to get support is to open an issue on this repo or join the [EleutherAI Discord server](https://discord.gg/eleutherai). The `#lm-thunderdome` channel is dedicated to developing this project and the `#release-discussion` channel is for receiving support for our releases. If you've used the library and have had a positive (or negative) experience, we'd love to hear from you!
+File an issue on this repo's GitLab tracker (`selfshipyard/selfai/self.language-eval`).
 
 ## Optional Extras
 

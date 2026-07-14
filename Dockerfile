@@ -15,9 +15,6 @@ WORKDIR /app
 RUN pip install --no-cache-dir -e ".[api,ifeval,math,multilingual]" && \
     pip install --no-cache-dir fastapi uvicorn aiofiles httpx
 
-# Apply live-events patch: injects live sample event emission into evaluator.py
-RUN python3 /app/patches/apply_patch.py
-
 RUN mkdir -p /workspace/results /workspace/logs
 
 EXPOSE 8096

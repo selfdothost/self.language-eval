@@ -14,6 +14,12 @@ Model Evaluation Harness (https://github.com/EleutherAI/lm-evaluation-harness),
 originally licensed MIT. It was previously carried as self.lm-evaluation-harness;
 the Python package was renamed lm_eval -> language_eval.
 
+Forked from upstream commit ee7e8f4fe58e13d6760c066474f0d01477317d1d ("Intel
+Gaudi support via optimum-habana (#3550)", 2026-03-18) — the last upstream
+commit before self.ai-specific integration work began. Full upstream git
+history up to that commit is preserved in this repository's log; no upstream
+tags were carried over.
+
 Why fully vendored: self.ai licenses the combined work under GPLv3. MIT is
 one-way compatible with GPLv3, so the upstream code is included here under GPLv3
 while its original MIT license text and attribution are retained in
