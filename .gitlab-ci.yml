@@ -39,6 +39,44 @@ test:language-eval:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
 
+# Non-blocking second pass: covers the torch/tokenizers/optimum-backed test
+# coverage the job above skips (see issue #1, "[from sweep] CI test stage
+# skips torch/tokenizers/optimum-backed test coverage"). Installs the `hf`
+# extra (torch, transformers, accelerate, peft — see language_eval/models/
+# huggingface.py imports) plus `optimum` (optimum[openvino], needed because
+# tests/models/test_openvino.py imports optimum.intel unconditionally at
+# module level, so it can't even collect without it).
+#
+# All exercised tests already use small real HF models/tokenizers that are
+# referenced elsewhere in this suite (EleutherAI/pythia-14m, -14m-deduped,
+# -70m, -160m; facebook/opt-125m; hf-internal-testing/tiny-random-gpt2 and
+# -tiny-random-t5; tokenizer-only allenai/OLMo-3-7B-Instruct) rather than
+# mocks — none of these files have a mock-model mode. That means this job
+# adds real network (model/tokenizer downloads from the HF Hub) and CPU
+# inference time on top of the main job; allow_failure covers that cost
+# being un-vetted so far.
+test:hf-backends:
+  stage: test
+  image: python:3.11-slim
+  timeout: 45m
+  before_script:
+    - pip install --no-cache-dir -e ".[hf,optimum]" pytest
+  script:
+    - >
+      pytest -q
+      tests/models/test_huggingface.py
+      tests/models/test_bos_handling.py
+      tests/models/test_hf_steered.py
+      tests/models/test_openvino.py
+      tests/models/test_sglang.py
+      tests/test_requests_caching.py
+      tests/test_utils.py
+      tests/test_evaluator.py
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
 build:language-eval:
   stage: build
   image:
