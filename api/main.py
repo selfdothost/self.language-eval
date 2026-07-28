@@ -17,9 +17,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import aiofiles
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+from auth import require_scope
 
 # ─── Constants ──────────────────────────────────────────────────────────
 
@@ -321,7 +323,7 @@ def _categorize_task(name: str) -> str:
 
 
 @app.get("/api/tasks")
-def list_tasks() -> List[TaskInfo]:
+def list_tasks(_auth=Depends(require_scope("tasks:read"))) -> List[TaskInfo]:
     return [
         TaskInfo(name=name, category=_categorize_task(name))
         for name in _get_all_tasks()
@@ -329,7 +331,7 @@ def list_tasks() -> List[TaskInfo]:
 
 
 @app.get("/api/tasks/categories")
-def list_task_categories() -> Dict[str, List[str]]:
+def list_task_categories(_auth=Depends(require_scope("tasks:read"))) -> Dict[str, List[str]]:
     categories: Dict[str, List[str]] = {}
     for name in _get_all_tasks():
         cat = _categorize_task(name)
@@ -572,7 +574,7 @@ def _run_dry_run_job(job_id: str, req: JobCreate):
 # ─── Jobs Endpoints ────────────────────────────────────────────────────
 
 @app.post("/api/jobs", status_code=201)
-def create_job(req: JobCreate) -> Job:
+def create_job(req: JobCreate, _auth=Depends(require_scope("jobs:create"))) -> Job:
     """Start a new language-eval evaluation job."""
     # Validate string inputs
     for field_name, value in [("tasks", req.tasks), ("model", req.model), ("base_url", req.base_url)]:
@@ -700,6 +702,7 @@ def create_job(req: JobCreate) -> Job:
 @app.get("/api/jobs")
 def list_jobs(
     status: Optional[JobStatus] = Query(None, description="Filter by status"),
+    _auth=Depends(require_scope("jobs:read")),
 ) -> List[Job]:
     jobs = sorted(_jobs.values(), key=lambda j: j.created_at, reverse=True)
     if status:
@@ -708,7 +711,7 @@ def list_jobs(
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str) -> Job:
+def get_job(job_id: str, _auth=Depends(require_scope("jobs:read"))) -> Job:
     _validate_id(job_id, "job_id")
     job = _jobs.get(job_id)
     if not job:
@@ -718,7 +721,10 @@ def get_job(job_id: str) -> Job:
 
 @app.get("/api/jobs/{job_id}/logs")
 async def get_job_logs(
-    job_id: str, tail: int = Query(100, ge=1, le=10000), stream: bool = Query(False)
+    job_id: str,
+    tail: int = Query(100, ge=1, le=10000),
+    stream: bool = Query(False),
+    _auth=Depends(require_scope("jobs:read")),
 ):
     _validate_id(job_id, "job_id")
     job = _jobs.get(job_id)
@@ -758,7 +764,7 @@ async def get_job_logs(
 
 
 @app.get("/api/jobs/{job_id}/live")
-async def get_job_live(job_id: str):
+async def get_job_live(job_id: str, _auth=Depends(require_scope("jobs:read"))):
     """Stream live sample events as SSE during a running evaluation.
 
     Reads from the JSONL events file written by the patched evaluator.
@@ -811,7 +817,7 @@ async def get_job_live(job_id: str):
 
 
 @app.delete("/api/jobs/{job_id}")
-def cancel_job(job_id: str):
+def cancel_job(job_id: str, _auth=Depends(require_scope("jobs:write"))):
     _validate_id(job_id, "job_id")
     job = _jobs.get(job_id)
     if not job:
@@ -836,7 +842,7 @@ def cancel_job(job_id: str):
 
 
 @app.delete("/api/jobs/{job_id}/purge")
-def purge_job(job_id: str):
+def purge_job(job_id: str, _auth=Depends(require_scope("jobs:write"))):
     _validate_id(job_id, "job_id")
     job = _jobs.get(job_id)
     if not job:
@@ -879,7 +885,7 @@ def _find_results_json(job: Job) -> Optional[Path]:
 
 
 @app.get("/api/results")
-def list_results() -> List[Dict[str, Any]]:
+def list_results(_auth=Depends(require_scope("jobs:read"))) -> List[Dict[str, Any]]:
     """List all completed evaluation results."""
     results = []
     for job_id, job in _jobs.items():
@@ -916,7 +922,7 @@ def list_results() -> List[Dict[str, Any]]:
 
 
 @app.get("/api/results/{job_id}")
-def get_result(job_id: str) -> Dict[str, Any]:
+def get_result(job_id: str, _auth=Depends(require_scope("jobs:read"))) -> Dict[str, Any]:
     _validate_id(job_id, "job_id")
     job = _jobs.get(job_id)
     if not job:
@@ -937,6 +943,7 @@ def get_result(job_id: str) -> Dict[str, Any]:
 def get_result_samples(
     job_id: str,
     task: Optional[str] = Query(None, description="Filter by task name"),
+    _auth=Depends(require_scope("jobs:read")),
 ) -> List[Dict[str, Any]]:
     """Get per-sample details for a completed evaluation.
 

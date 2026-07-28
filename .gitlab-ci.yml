@@ -1,8 +1,14 @@
 # self.language-eval CI — test, then yard-native image build, then mirror sync.
-# kaniko on bigbuild -> container.home (same pattern as self.ai / self.chat).
+# buildkit-rootless on bigbuild -> container.home (gitlab-profile#60 /
+# self.infrastructure#143). NOT kaniko: kaniko's writable layer always lands on
+# the node's containerd root and can't be redirected; buildkit's state is a flag
+# (`--root`) pointed at the /builds mount, and it runs rootless (uid 1000).
 # CPU-only: the harness runs benchmarks by calling each model's OpenAI-compatible
 # API, it doesn't run models locally. Builds the FastAPI control plane + the
 # vendored language-eval framework into one image (api/main.py on :8096).
+#
+# Two-job split (selfinfra/zlib reference): build:language-eval is the MR gate
+# (builds, NO push); publish:language-eval builds + pushes on main only.
 
 stages: [test, build, publish]
 
@@ -16,6 +22,29 @@ default:
 
 variables:
   IMAGE: $CI_REGISTRY_IMAGE
+  BUILDKIT_IMAGE: "moby/buildkit:v0.31.2-rootless"   # pinned, not master
+  # Bursty CI jobs: SMALL requests so a job schedules even on a busy node, HIGH
+  # limits so it can burst when it actually runs. These jobs sit idle until
+  # triggered, need real CPU/RAM only briefly, and don't all run at once — so
+  # right-sizing the request (not the limit) is what lets k8s bin-pack them.
+  # Requires the runner to permit resource overwrites (self.infrastructure#173).
+  KUBERNETES_CPU_REQUEST: "250m"
+  KUBERNETES_CPU_LIMIT: "8"
+  KUBERNETES_MEMORY_REQUEST: "1Gi"
+  KUBERNETES_MEMORY_LIMIT: "16Gi"
+
+# Registry auth + buildkit state dir, both OUTSIDE the build context (a SIBLING
+# of $CI_PROJECT_DIR): the CI_JOB_TOKEN credential must never sit where a
+# `COPY . .` could bake it into the image (gitlab-profile#60 trap 3). --root
+# points build bytes at the /builds mount, off the node containerd root (#143).
+.buildkit-before: &buildkit-before
+  - export BK_SCRATCH="${CI_BUILDS_DIR:-/builds}/.buildkit"
+  - mkdir -p "$BK_SCRATCH" 2>/dev/null || export BK_SCRATCH="$(dirname "$CI_PROJECT_DIR")/.buildkit"
+  - mkdir -p "$BK_SCRATCH/state" "$BK_SCRATCH/docker"
+  - export DOCKER_CONFIG="$BK_SCRATCH/docker"
+  - echo "{\"auths\":{\"$CI_REGISTRY\":{\"auth\":\"$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_JOB_TOKEN" | base64 | tr -d '\n')\"}}}" > "$DOCKER_CONFIG/config.json"
+  - chmod 600 "$DOCKER_CONFIG/config.json"
+  - export BUILDKITD_FLAGS="--oci-worker-no-process-sandbox --root $BK_SCRATCH/state"
 
 test:language-eval:
   stage: test
@@ -29,32 +58,38 @@ test:language-eval:
     # exercise those optional model backends — they need deps the shipped
     # image never installs, so they can't run here (see the
     # "[from sweep]" CI-coverage issue for the tracked gap).
+    # tests/api (self.ai#25's ticket-auth layer) needs fastapi/httpx/PyJWT,
+    # which this harness-focused job deliberately doesn't install — covered
+    # instead by the dedicated test:language-eval-api job below.
     - >
       pytest tests/ -q
       --ignore=tests/models
       --ignore=tests/test_requests_caching.py
       --ignore=tests/test_utils.py
       --ignore=tests/test_evaluator.py
+      --ignore=tests/api
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
 
-# Non-blocking second pass: covers the torch/tokenizers/optimum-backed test
-# coverage the job above skips (see issue #1, "[from sweep] CI test stage
-# skips torch/tokenizers/optimum-backed test coverage"). Installs the `hf`
-# extra (torch, transformers, accelerate, peft — see language_eval/models/
-# huggingface.py imports) plus `optimum` (optimum[openvino], needed because
-# tests/models/test_openvino.py imports optimum.intel unconditionally at
-# module level, so it can't even collect without it).
-#
-# All exercised tests already use small real HF models/tokenizers that are
-# referenced elsewhere in this suite (EleutherAI/pythia-14m, -14m-deduped,
-# -70m, -160m; facebook/opt-125m; hf-internal-testing/tiny-random-gpt2 and
-# -tiny-random-t5; tokenizer-only allenai/OLMo-3-7B-Instruct) rather than
-# mocks — none of these files have a mock-model mode. That means this job
-# adds real network (model/tokenizer downloads from the HF Hub) and CPU
-# inference time on top of the main job; allow_failure covers that cost
-# being un-vetted so far.
+# self.ai#25: service-ticket auth layer on the control API (api/auth.py).
+# Targeted job, mirroring self.code-eval's twin test:code-eval-api job —
+# keep both in sync.
+test:language-eval-api:
+  stage: test
+  image: python:3.11-slim
+  timeout: 15m
+  before_script:
+    - pip install --no-cache-dir -e . fastapi "uvicorn[standard]" aiofiles httpx pytest PyJWT
+  script:
+    - pytest tests/api -q
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# Non-blocking second pass: torch/tokenizers/optimum-backed coverage the job
+# above skips (issue #1). Real HF models + CPU inference; allow_failure covers
+# the un-vetted network/time cost.
 test:hf-backends:
   stage: test
   image: python:3.11-slim
@@ -77,26 +112,42 @@ test:hf-backends:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
 
+# --- build: MR gate — full image, NO push (omit --output = kaniko --no-push) ---
 build:language-eval:
   stage: build
-  image:
-    name: gcr.io/kaniko-project/executor:debug
-    entrypoint: [""]
+  image: { name: "$BUILDKIT_IMAGE", entrypoint: [""] }
   timeout: 1h
-  before_script:
-    - mkdir -p /kaniko/.docker
-    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"auth\":\"$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_JOB_TOKEN" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
-  script:
-    - >
-      /kaniko/executor
-      --context "$CI_PROJECT_DIR"
-      --dockerfile Dockerfile
-      --cache=true --cache-repo "$IMAGE/cache"
-      --destination "$IMAGE:$CI_COMMIT_SHORT_SHA"
-      --destination "$IMAGE:latest"
+  before_script: *buildkit-before
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - >
+      buildctl-daemonless.sh build
+      --frontend dockerfile.v0
+      --local context="$CI_PROJECT_DIR"
+      --local dockerfile="$CI_PROJECT_DIR"
+      --import-cache "type=registry,ref=${IMAGE}/cache"
+      --export-cache "type=registry,ref=${IMAGE}/cache,mode=max"
+
+# --- publish: build + push :sha and :latest (main only) ---
+publish:language-eval:
+  stage: publish
+  image: { name: "$BUILDKIT_IMAGE", entrypoint: [""] }
+  timeout: 1h
+  before_script: *buildkit-before
+  rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
+  script:
+    - export TAGS="${IMAGE}:${CI_COMMIT_SHORT_SHA},${IMAGE}:latest"
+    - 'export OUT="type=image,\"name=${TAGS}\",push=true"'
+    - >
+      buildctl-daemonless.sh build
+      --frontend dockerfile.v0
+      --local context="$CI_PROJECT_DIR"
+      --local dockerfile="$CI_PROJECT_DIR"
+      --import-cache "type=registry,ref=${IMAGE}/cache"
+      --export-cache "type=registry,ref=${IMAGE}/cache,mode=max"
+      --output "$OUT"
 
 # --- publish: mirror main -> public-alpha (GitLab + GitHub), scheduled only -
 sync:public-alpha:

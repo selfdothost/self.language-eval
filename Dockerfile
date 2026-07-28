@@ -12,8 +12,9 @@ COPY . /app
 WORKDIR /app
 
 # Install lm-evaluation-harness and its dependencies
+# PyJWT: service-ticket auth (api/auth.py, self.ai#25).
 RUN pip install --no-cache-dir -e ".[api,ifeval,math,multilingual]" && \
-    pip install --no-cache-dir fastapi uvicorn aiofiles httpx
+    pip install --no-cache-dir fastapi uvicorn aiofiles httpx PyJWT
 
 RUN mkdir -p /workspace/results /workspace/logs
 
