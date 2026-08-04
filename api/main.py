@@ -11,6 +11,8 @@ import os
 import re
 import subprocess
 import uuid
+
+import yaml
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -29,6 +31,12 @@ WORKSPACE = Path("/workspace")
 RESULTS_DIR = WORKSPACE / "results"
 LOGS_DIR = WORKSPACE / "logs"
 JOBS_STATE_FILE = RESULTS_DIR / ".jobs.json"
+
+# Admin-registered task configs (self.language-eval#2). Same PVC as results --
+# no new volume, and it is already the one thing this pod owns durably. The API
+# pod cannot write here directly: every PVC in the tenant is RWO local-path, so
+# self.ai pushes definitions over this control API instead.
+CUSTOM_TASKS_DIR = Path(os.environ.get("CUSTOM_TASKS_DIR", str(WORKSPACE / "custom_tasks")))
 
 API_VERSION = "1.0.0"
 
@@ -73,10 +81,18 @@ def _sanitize_log_line(line: str) -> str:
 # ─── Task Discovery ────────────────────────────────────────────────────
 
 def _discover_tasks() -> List[str]:
-    """Use language_eval's task manager to list available tasks."""
+    """Use language_eval's task manager to list available tasks.
+
+    Custom configs in CUSTOM_TASKS_DIR are included. TaskManager processes the
+    built-in directory FIRST and include_path second, and a later path shadows
+    an earlier one -- so a custom task could silently redefine a built-in. That
+    is refused at the write boundary (:func:`create_task`) rather than relied on
+    here, because by the time discovery runs the shadowing has already happened.
+    """
     try:
         from language_eval.tasks import TaskManager
-        tm = TaskManager()
+        include = str(CUSTOM_TASKS_DIR) if CUSTOM_TASKS_DIR.is_dir() else None
+        tm = TaskManager(include_path=include) if include else TaskManager()
         return sorted(tm.all_tasks)
     except Exception as e:
         print(f"Warning: could not discover tasks: {e}")
@@ -91,6 +107,36 @@ def _get_all_tasks() -> List[str]:
     if not _ALL_TASKS:
         _ALL_TASKS = _discover_tasks()
     return _ALL_TASKS
+
+
+def _discover_builtin_tasks() -> List[str]:
+    """Task names the harness ships, EXCLUDING custom registrations.
+
+    Deliberately separate from :func:`_discover_tasks`: the shadow check needs
+    to know what a name means *without* include_path, and asking the combined
+    list would happily report a name as taken by the very registration being
+    validated.
+    """
+    try:
+        from language_eval.tasks import TaskManager
+        return sorted(TaskManager().all_tasks)
+    except Exception as e:
+        print(f"Warning: could not discover built-in tasks: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Cannot verify the task name against built-ins right now; registration refused.",
+        )
+
+
+def _invalidate_task_cache() -> None:
+    """Drop the memoised task list so the next read re-scans.
+
+    Without this the cache is populated once per process and never refreshed,
+    so a task added at runtime would not appear until the pod restarted -- i.e.
+    "add an evaluation" would silently do nothing until someone bounced it.
+    """
+    global _ALL_TASKS
+    _ALL_TASKS = []
 
 
 # ─── Enums and Models ───────────────────────────────────────────────────
@@ -337,6 +383,139 @@ def list_task_categories(_auth=Depends(require_scope("tasks:read"))) -> Dict[str
         cat = _categorize_task(name)
         categories.setdefault(cat, []).append(name)
     return categories
+
+
+# ─── Custom Task Registration (self.language-eval#2) ───────────────────
+#
+# A custom task is a YAML config naming an HF `dataset_path` -- structurally the
+# same act as adding a Dataset, with no code introduced. Keeping it that way is
+# the whole security posture here, because lm-eval task YAML has two paths that
+# do execute code:
+#
+# 1. `!function utils.doc_to_text` -- `language_eval/utils.py::import_function`
+#    resolves it to a .py NEXT TO THE YAML and calls `spec.loader.exec_module`.
+#    We accept only a YAML, never a .py, but a reference is still refused
+#    outright: `yaml.safe_load` raises on any unknown tag, so the parse below is
+#    both the syntax check and the code-execution guard. A task needing a custom
+#    function is simply not supported through this endpoint -- stated, not
+#    half-worked-around.
+# 2. `dataset_kwargs.trust_remote_code` -- executes the dataset's own loading
+#    script. `api/task.py::download` only strips it for datasets>=4.0.0, and the
+#    dependency pin is `datasets>=2.16.0`, so this is closed on the image we run
+#    today (5.0.1) and would silently reopen on a downgrade. Refused here so the
+#    guarantee does not depend on a transitive version.
+
+#: Task names become a filename stem and a `--tasks` CLI argument.
+_TASK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,95}$")
+
+#: A task config is small. This is a guard against a pathological upload, not a
+#: meaningful limit on real configs.
+_MAX_TASK_YAML_BYTES = 256 * 1024
+
+
+class TaskCreate(BaseModel):
+    name: str = Field(..., description="Task name; must match the `task:` key in the YAML")
+    yaml_config: str = Field(..., description="The task config, as YAML")
+
+
+def _validate_task_yaml(name: str, raw: str) -> dict:
+    """Parse and vet a submitted task config. Raises HTTPException on refusal."""
+    if len(raw.encode("utf-8")) > _MAX_TASK_YAML_BYTES:
+        raise HTTPException(status_code=400, detail="Task config exceeds 256 KiB")
+
+    try:
+        # safe_load, deliberately: it refuses `!function` and every other custom
+        # tag, which is the code-execution guard described above.
+        parsed = yaml.safe_load(raw)
+    except yaml.YAMLError as e:
+        detail = str(e).replace("\n", " ")
+        if "could not determine a constructor" in detail or "!function" in raw:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Task config uses a custom YAML tag (e.g. !function). That would load and "
+                    "execute a Python module alongside the config, which this endpoint does not "
+                    "accept. Use a config that references only data."
+                ),
+            )
+        raise HTTPException(status_code=400, detail=f"Task config is not valid YAML: {detail}")
+
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="Task config must be a YAML mapping")
+
+    declared = parsed.get("task")
+    if declared != name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task config declares task: {declared!r} but was registered as {name!r}; they must match",
+        )
+
+    kwargs = parsed.get("dataset_kwargs")
+    if isinstance(kwargs, dict) and kwargs.get("trust_remote_code"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "dataset_kwargs.trust_remote_code is not accepted: it executes the dataset's own "
+                "loading script inside this harness."
+            ),
+        )
+
+    return parsed
+
+
+@app.post("/api/tasks", status_code=201)
+def create_task(req: TaskCreate, _auth=Depends(require_scope("tasks:write"))) -> TaskInfo:
+    """Register a custom task config.
+
+    Idempotent by name: re-posting the same name replaces the stored config,
+    which is what makes an edit upstream in self.ai deliverable.
+    """
+    if not _TASK_NAME_RE.match(req.name):
+        raise HTTPException(
+            status_code=400,
+            detail="name must be lowercase alphanumerics plus '.', '-', '_', starting with a letter or digit",
+        )
+
+    _validate_task_yaml(req.name, req.yaml_config)
+
+    # Refuse to shadow a built-in. TaskManager lets include_path override the
+    # built-in directory, so without this a registration could silently change
+    # what an existing benchmark means -- and results recorded under that name
+    # would be attributed to the wrong task.
+    builtin = set(_discover_builtin_tasks())
+    if req.name in builtin:
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{req.name}' is a built-in task; registering it would shadow the built-in",
+        )
+
+    CUSTOM_TASKS_DIR.mkdir(parents=True, exist_ok=True)
+    target = CUSTOM_TASKS_DIR / f"{req.name}.yaml"
+    # resolve() then verify containment: belt-and-braces against a name that
+    # slipped the regex.
+    if not str(target.resolve()).startswith(str(CUSTOM_TASKS_DIR.resolve())):
+        raise HTTPException(status_code=400, detail="Invalid task name")
+    target.write_text(req.yaml_config, encoding="utf-8")
+
+    _invalidate_task_cache()
+    return TaskInfo(name=req.name, category=_categorize_task(req.name))
+
+
+@app.delete("/api/tasks/{name}")
+def delete_task(name: str, _auth=Depends(require_scope("tasks:write"))) -> Dict[str, str]:
+    """Remove a custom task config. Built-ins are not deletable."""
+    if not _TASK_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="Invalid task name")
+
+    target = CUSTOM_TASKS_DIR / f"{name}.yaml"
+    if not str(target.resolve()).startswith(str(CUSTOM_TASKS_DIR.resolve())):
+        raise HTTPException(status_code=400, detail="Invalid task name")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail=f"No custom task named '{name}'")
+
+    target.unlink()
+    _invalidate_task_cache()
+    return {"deleted": name}
 
 
 # ─── Dry-Run Synthetic Data ───────────────────────────────────────────
@@ -638,6 +817,14 @@ def create_job(req: JobCreate, _auth=Depends(require_scope("jobs:create"))) -> J
         "--batch_size", str(req.batch_size),
         "--output_path", output_dir,
     ]
+
+    # Without this a registered task is listable but NOT runnable: discovery
+    # honours CUSTOM_TASKS_DIR, and the CLI subprocess is a separate process
+    # that would build its own TaskManager with defaults only and fail to
+    # resolve the name. Listable-but-unrunnable is the worse failure of the two,
+    # because it looks like it worked.
+    if CUSTOM_TASKS_DIR.is_dir():
+        cmd.extend(["--include_path", str(CUSTOM_TASKS_DIR)])
 
     if req.num_fewshot is not None:
         cmd.extend(["--num_fewshot", str(req.num_fewshot)])

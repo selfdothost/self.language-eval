@@ -30,7 +30,7 @@ TEST_SERVICE_AUTH_AUDIENCE = "self.language-eval"
 # Every scope this API currently gates, so a default all-access ticket can
 # hit any endpoint without individual tests needing to know about scopes —
 # scope enforcement itself is covered separately in test_auth.py.
-ALL_SCOPES = "tasks:read jobs:read jobs:create jobs:write"
+ALL_SCOPES = "tasks:read tasks:write jobs:read jobs:create jobs:write"
 
 
 def mint_test_ticket(
@@ -70,6 +70,7 @@ def temp_workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(main_module, "RESULTS_DIR", results_dir)
     monkeypatch.setattr(main_module, "LOGS_DIR", logs_dir)
     monkeypatch.setattr(main_module, "JOBS_STATE_FILE", results_dir / ".jobs.json")
+    monkeypatch.setattr(main_module, "CUSTOM_TASKS_DIR", tmp_path / "custom_tasks")
     monkeypatch.setattr(main_module, "_jobs", {})
     monkeypatch.setattr(main_module, "_processes", {})
 
